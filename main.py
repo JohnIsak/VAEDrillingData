@@ -4,15 +4,25 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import ConcatDataset, DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader
 from captum.attr import FeaturePermutation, FeatureAblation, IntegratedGradients
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import KFold
 import seaborn as sb
 import matplotlib.pyplot as plt
+import process_data
 import numpy as np
 import vae
 import plots
+
+reduced_indices = True
+big_loss_indexes = [5611, 7024, 7763] # Loss indexes when including RPM and WOB
+# loss_indices_non_WOB_RPM = [2016, 2058, 2142, 2145, 2147, 2152, 2154, 3825, 4162, 4190, 5323, 5709, 7018]
+loss_indices_non_control = [8819, 15230]
+
+indices_non_control_parameters = torch.tensor([0, 2, 3, 4, 8, 9, 10, 11])
+
+
 
 class DataSet(torch.utils.data.Dataset):
     def __init__(self, X):
@@ -27,27 +37,74 @@ class DataSet(torch.utils.data.Dataset):
         return _x
 
 def main():
-    # make_sequential(30)
+    # process_data.process_data(30)
     # return 0
+
+
+    # val = torch.load("data/val_seqlen_30")
+    # forward_val(val, torch.load("models/VAE_indecestensor([ 0,  2,  3,  4,  8,  9, 10, 11])"))
+    # return 0
+
+    # val = torch.load("data/val_seqlen_30")
+    # plots.plot_anomaly(val, loss_indices_non_control)
+    # return 0
+
+    val = torch.load("data/val_seqlen_30")
+    model = torch.load("models/VAE_indecestensor([ 0,  2,  3,  4,  8,  9, 10, 11])")
+    plots.plot(val, model, loss_indices_non_control)
+    return 0
 
     train = torch.load("data/train_seqlen_30")
     val = torch.load("data/val_seqlen_30")
     model = vae.VAE()
     training(model, 30, train, val, 100)
 
+def forward_val(data :DataLoader, model: nn.Module):
+    saved_index = 0
+    max_loss = 0
+    indexes = []
+    for i in range(data.dataset.X.shape[0]):
+        x = data.dataset.X[i].unsqueeze(0)
+        x_recon, mu, logvar = model.forward(x)
+
+        if reduced_indices:
+            x_recon = torch.index_select(x_recon, 2, indices_non_control_parameters)
+            x = torch.index_select(x, 2, indices_non_control_parameters)
+
+        loss = F.mse_loss(x_recon, x)
+        if loss > 0.75:
+
+            print(saved_index, "saved index")
+            print(i, "current index")
+            if saved_index + 1 == i:
+                saved_index = i
+                print(loss, "loss")
+                print(max_loss, "max loss")
+                if loss > max_loss:
+                    max_loss = loss
+                    indexes[-1] = i
+                    print(indexes, "indexes")
+            else:
+                print("appending")
+                indexes.append(i)
+                max_loss = loss
+                saved_index = i
+    print(indexes)
 
 def loss_function(recon_x, x, mu, log_var):
     # print(recon_x.shape)
     # print(x.shape)
+
+    # When utilizing
+    if reduced_indices:
+        recon_x = torch.index_select(recon_x, 2, indices_non_control_parameters)
+        x = torch.index_select(x, 2, indices_non_control_parameters)
+
     MSE = F.mse_loss(recon_x, x, reduction='mean')
 
     # KL divergence
     beta = 0.1
     KLD = beta * (-0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp()))
-    if np.random.rand() < 0.01:
-        print("MSE: ", MSE, "KLD: ", KLD)
-        print("mu: ", mu, "log_var: ", log_var)
-        print("recon_x - x: ", recon_x - x)
 
     return MSE + KLD
 
@@ -83,54 +140,17 @@ def training(model, num_intervals, train, val, num_epochs):
 
         train_loss[epoch] = running_loss
         print("Training loss: ", running_loss)
-        model.eval()
 
+        model.eval()
         running_loss = forward(val, False)
 
         val_loss[epoch] = running_loss
         print("Validation loss: ", running_loss)
         if running_loss < best_val_loss:
             print("Saving model")
-            torch.save(model, "models/" + model.__class__.__name__ + "_nInt" + str(num_intervals))
+            torch.save(model, "models/" + model.__class__.__name__ + "_indeces" + str(indices_non_control_parameters))
             best_val_loss = running_loss
     plots.plot_training(train_loss, val_loss, model)
-
-
-def make_sequential(sequence_length):
-    x = torch.load("data/X")
-    y = torch.load("data/Y")
-
-    print(y.shape)
-    y = y.unsqueeze(1)
-    x = torch.concat((x, y), 1)
-    print(x)
-    print(x.shape)
-
-    x_seq = torch.zeros((x.shape[0] - sequence_length, sequence_length, x.shape[1]))
-
-    for i in range(x.shape[0] - sequence_length):
-        x_seq[i] = x[i:i + sequence_length]
-
-    print(x_seq.shape)
-    print(x_seq[0], "x_seq 0 ")
-
-    train = DataSet(x_seq[:int(len(x)*0.8)])
-    val = DataSet(x_seq[int(len(x)*0.8):])
-
-    print(train.X[0], "train 0")
-    print(train.X[1], "train 1")
-    print(train.X[0].shape, "train 0 shape")
-    print(train.X[1].shape, "train 1 shape")
-    train = DataLoader(train, batch_size=128, shuffle=True)
-    val = DataLoader(val, batch_size=128, shuffle=False)
-
-    torch.save(train, "data/train_seqlen_" + str(sequence_length))
-    torch.save(val, "data/val_seqlen_" + str(sequence_length))
-
-    # Sanity check
-    # for i in range(100):
-    #    for j in range(30):
-    #        print(x[i+j] - x_seq[i, j])
 
 if __name__ == '__main__':
     main()
